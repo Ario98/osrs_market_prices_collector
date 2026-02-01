@@ -1,0 +1,113 @@
+# OSRS Market Data Collector
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Python cache and tooling
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.pytype/
+.pyre/
+.python-version
+
+# Package managers
+.pdm.toml
+.pdm-python
+.pdm-build/
+__pypackages__/
+.pip-wheel-metadata/
+
+# Testing and CI
+.tox/
+.nox/
+.coverage.*
+.cache/
+
+# Git
+.git/
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/*.log
+*.log
+
+# Database backups
+backups/
+*.dump
+*.sql.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets (keep example)
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+*.swo
+*~
+
+# Database data and runtime files
+timescale_data/
+grafana_data/
+logs/*.log
+*.dump
+*.sql.gz
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini

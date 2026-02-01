@@ -1,0 +1,28 @@
+# =============================================================================
+# Grafana Datasource Configuration for OSRS Market Data Collector
+# =============================================================================
+# This file configures the TimescaleDB datasource automatically when Grafana
+# starts up in Docker. No manual configuration needed!
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: OSRS-TimescaleDB
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    user: $__env{POSTGRES_USER}
+    secureJsonData:
+      password: $__env{POSTGRES_PASSWORD}
+    jsonData:
+      database: osrs_market
+      sslmode: disable
+      maxOpenConns: 100
+      maxIdleConns: 100
+      maxIdleConnsAuto: true
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: true
+    isDefault: true
+    editable: false

@@ -1,0 +1,74 @@
+# =============================================================================
+# Dockerfile for OSRS Market Data Collectors
+# =============================================================================
+# This image is used for real-time, backfill, and metadata collectors
+# =============================================================================
+
+FROM python:3.11-slim
+
+# Set timezone to UTC
+ENV TZ=UTC
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy collector code
+COPY collectors/ ./collectors/
+
+# Create logs directory
+RUN mkdir -p /app/logs
+
+# Set PYTHONPATH
+ENV PYTHONPATH=/app
+
+# Health check endpoint (for realtime collector)
+RUN echo 'from http.server import HTTPServer, BaseHTTPRequestHandler\n\
+import json\n\
+class HealthHandler(BaseHTTPRequestHandler):\n\
+    def do_GET(self):\n\
+        if self.path == "/health":\n\
+            self.send_response(200)\n\
+            self.send_header("Content-type", "application/json")\n\
+            self.end_headers()\n\
+            self.wfile.write(json.dumps({"status": "ok"}).encode())\n\
+        else:\n\
+            self.send_response(404)\n\
+            self.end_headers()\n\
+    def log_message(self, format, *args): pass\n\
+httpd = HTTPServer(("", 8080), HealthHandler)\n\
+import threading\n\
+threading.Thread(target=httpd.serve_forever, daemon=True).start()' > /tmp/health_server.py
+
+# Entry point script that determines which collector to run
+RUN echo '#!/bin/bash\n\
+python /tmp/health_server.py 2>/dev/null &\n\
+if [ "$COLLECTOR_TYPE" = "realtime" ]; then\n\
+    exec python -m collectors.realtime_collector\n\
+elif [ "$COLLECTOR_TYPE" = "backfill" ]; then\n\
+    exec python -m collectors.backfill_collector\n\
+elif [ "$COLLECTOR_TYPE" = "metadata" ]; then\n\
+    exec python -m collectors.metadata_collector\n\
+else\n\
+    echo "Unknown collector type: $COLLECTOR_TYPE"\n\
+    exit 1\n\
+fi' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# Run as non-root user for security
+RUN useradd -m -u 1000 collector && chown -R collector:collector /app
+USER collector
+
+# Entry point
+ENTRYPOINT ["/app/entrypoint.sh"]

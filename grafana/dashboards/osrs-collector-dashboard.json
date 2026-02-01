@@ -1,0 +1,237 @@
+{
+  "dashboard": {
+    "title": "OSRS Market Data Collector - Overview",
+    "tags": ["osrs", "market-data", "collector"],
+    "timezone": "utc",
+    "schemaVersion": 36,
+    "refresh": "30s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Annotations & Alerts",
+          "datasource": {
+            "type": "grafana",
+            "uid": "-- Grafana --"
+          },
+          "showIn": 0,
+          "tags": [],
+          "type": "dashboard"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Collection Status",
+        "type": "stat",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT status, COUNT(*) as value FROM collector_state GROUP BY status",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "red", "value": 1}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Real-Time Lag (minutes)",
+        "type": "gauge",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) / 60 as lag_minutes FROM prices",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "options": {
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true
+        },
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 60,
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 15}
+              ]
+            },
+            "unit": "m"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Database Size",
+        "type": "stat",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT pg_size_pretty(pg_database_size('osrs_market')) as size",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Items Tracked",
+        "type": "stat",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT COUNT(DISTINCT item_id) as count FROM prices WHERE timestamp > NOW() - INTERVAL '1 hour'",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "options": {
+          "colorMode": "value"
+        }
+      },
+      {
+        "id": 5,
+        "title": "Records Inserted (Last Hour)",
+        "type": "graph",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT time_bucket('5 minutes', inserted_at) as time, COUNT(*) as records FROM prices WHERE inserted_at > NOW() - INTERVAL '1 hour' GROUP BY time ORDER BY time",
+            "format": "time_series"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Backfill Progress",
+        "type": "graph",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT current_timestamp as time, progress_percentage FROM backfill_progress WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
+            "format": "time_series"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 100,
+            "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Data Gaps Detected",
+        "type": "stat",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT status, COUNT(*) as count FROM data_gaps WHERE detected_at > NOW() - INTERVAL '24 hours' GROUP BY status",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 8, "x": 0, "y": 12},
+        "options": {
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 8,
+        "title": "API Calls (Last Hour)",
+        "type": "graph",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT time_bucket('5 minutes', timestamp) as time, COUNT(*) as calls FROM collection_metrics WHERE timestamp > NOW() - INTERVAL '1 hour' AND operation_type = 'fetch' GROUP BY time ORDER BY time",
+            "format": "time_series"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 16, "x": 8, "y": 12},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Top Items by Volume (Last Hour)",
+        "type": "table",
+        "targets": [
+          {
+            "datasource": {
+              "type": "postgres",
+              "uid": "OSRS-TimescaleDB"
+            },
+            "rawSql": "SELECT i.name, p.item_id, SUM(p.total_volume) as total_volume, AVG(p.avg_high_price) as avg_price FROM prices p JOIN items i ON p.item_id = i.item_id WHERE p.timestamp > NOW() - INTERVAL '1 hour' GROUP BY p.item_id, i.name ORDER BY total_volume DESC LIMIT 20",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 12, "w": 24, "x": 0, "y": 20}
+      }
+    ]
+  }
+}
