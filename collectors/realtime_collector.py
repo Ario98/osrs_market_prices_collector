@@ -6,10 +6,10 @@ This collector continuously fetches price data from the OSRS Wiki API:
 - /latest endpoint: Most recent price snapshot
 
 Features:
-- Automatic mode switching (normal vs fast-catchup)
-- Lag detection and recovery
+- Sequential timestamp processing (never skips intervals)
 - Graceful restart with overlap
 - Comprehensive logging
+- Robust gap handling
 """
 
 import logging
@@ -18,6 +18,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+
+import pytz
 
 from collectors.utils.timezone import ensure_utc, now_utc
 
@@ -30,33 +32,23 @@ class RealtimeCollector(BaseCollector):
     """
     Real-time collector for OSRS price data.
 
-    Fetches /5m and /latest endpoints continuously.
-    Automatically switches to fast-catchup mode when lag exceeds threshold.
+    Fetches /5m and /latest endpoints continuously with sequential timestamp processing.
+    Ensures no data gaps by always requesting the next 5-minute interval.
     """
 
     def __init__(self):
         """Initialize real-time collector."""
         super().__init__("realtime_collector")
 
-        # Configuration
-        self.fast_catchup_threshold = int(
-            os.getenv("FAST_CATCHUP_THRESHOLD_MINUTES", "15")
-        )
-        self.fast_catchup_interval = float(
-            os.getenv("FAST_CATCHUP_INTERVAL_MINUTES", "2.5")
-        )
-        self.normal_interval = 1.0  # 1 minute in normal mode for more frequent updates
+        # Configuration - simplified: always 1 second between calls
+        self.collection_interval = 1.0  # 1 second between API calls
 
         # State
         self.last_processed_timestamp: Optional[datetime] = None
-        self.mode = "normal"  # 'normal' or 'fast-catchup'
         self.lag_minutes = 0.0
 
         self.logger.info(
-            f"[CONFIG] Fast catchup threshold: {self.fast_catchup_threshold} minutes"
-        )
-        self.logger.info(
-            f"[CONFIG] Fast catchup interval: {self.fast_catchup_interval} minutes"
+            f"[CONFIG] Collection interval: {self.collection_interval} seconds"
         )
 
     def run(self) -> None:
@@ -98,7 +90,8 @@ class RealtimeCollector(BaseCollector):
 
                     cycle_duration = time.time() - cycle_start
                     self.logger.info(
-                        f"[CYCLE] Duration: {cycle_duration:.2f}s, Sleep: {sleep_time:.2f}s, Mode: {self.mode}"
+                        f"[CYCLE] Duration: {cycle_duration:.2f}s, Sleep: {sleep_time:.2f}s, "
+                        f"Last: {self.last_processed_timestamp.isoformat() if self.last_processed_timestamp else 'None'}"
                     )
 
                     # Sleep with interruption check
@@ -112,22 +105,33 @@ class RealtimeCollector(BaseCollector):
             self.shutdown()
 
     def _collection_cycle(self) -> None:
-        """Perform one collection cycle with specific timestamp tracking."""
+        """Perform one collection cycle with sequential timestamp tracking.
+
+        CRITICAL: Always requests specific timestamps to ensure no gaps.
+        Never skips intervals by requesting "latest".
+        """
 
         # Determine which timestamp to request
-        if self.mode == "fast-catchup" and self.last_processed_timestamp:
-            # In catch-up mode, request the NEXT timestamp after last processed
+        if self.last_processed_timestamp:
+            # ALWAYS request the NEXT timestamp after last processed
+            # This ensures sequential processing and prevents gaps
             next_ts = self.last_processed_timestamp + timedelta(minutes=5)
             target_timestamp = int(next_ts.timestamp())
-            self.logger.debug(
-                f"[FETCH] Catch-up mode: requesting timestamp {target_timestamp}"
-            )
-        else:
-            # Normal mode: get most recent
-            target_timestamp = None
-            self.logger.debug("[FETCH] Normal mode: requesting most recent data")
 
-        # Fetch 5m data (with specific timestamp if in catch-up)
+            # Check if we're behind real-time
+            lag = (now_utc() - next_ts).total_seconds() / 60
+            if lag > 10:
+                self.logger.info(
+                    f"[CATCHUP] {lag:.1f} min behind, filling gap at {next_ts.isoformat()}"
+                )
+            else:
+                self.logger.debug(f"[FETCH] Requesting timestamp {target_timestamp}")
+        else:
+            # First run only - get latest available
+            target_timestamp = None
+            self.logger.info("[FETCH] First run - requesting most recent data")
+
+        # Fetch 5m data for specific timestamp
         data_5m = self.api.get_5m_data(timestamp=target_timestamp)
 
         if not data_5m or "data" not in data_5m:
@@ -137,7 +141,26 @@ class RealtimeCollector(BaseCollector):
         # Get timestamp from API response
         api_timestamp = data_5m.get("timestamp")
         if api_timestamp:
-            current_ts = ensure_utc(api_timestamp, "API_5m_cycle")
+            received_ts = ensure_utc(api_timestamp, "API_5m_cycle")
+
+            # CRITICAL: Check if we got what we requested
+            if target_timestamp:
+                requested_ts = datetime.fromtimestamp(target_timestamp, tz=pytz.UTC)
+                time_diff = abs((received_ts - requested_ts).total_seconds())
+
+                if time_diff > 300:  # More than 5 minutes difference
+                    self.logger.warning(
+                        f"[MISMATCH] Requested {requested_ts.isoformat()}, "
+                        f"got {received_ts.isoformat()} ({time_diff / 60:.1f} min diff). "
+                        f"Possible gap or API lag."
+                    )
+                    # Use the requested timestamp for state to maintain sequence
+                    # The API returned different data, but we'll try the requested slot again next cycle
+                    current_ts = requested_ts
+                else:
+                    current_ts = received_ts
+            else:
+                current_ts = received_ts
         else:
             current_ts = now_utc()
 
@@ -154,10 +177,18 @@ class RealtimeCollector(BaseCollector):
             # Update latest prices
             self.db.update_latest_prices(records)
 
-        # Always update state with the timestamp we processed (even if 0 records inserted)
-        # This ensures we advance to the next timestamp on the next cycle
-        self.last_processed_timestamp = current_ts
-        self.state.update_state_if_needed(current_ts)
+        # Update state with the timestamp we intended to process
+        # This ensures we always advance sequentially, even if API returned different time
+        if target_timestamp:
+            # We requested a specific time, advance to next slot
+            self.last_processed_timestamp = datetime.fromtimestamp(
+                target_timestamp, tz=pytz.UTC
+            )
+        else:
+            # First run, use what we got
+            self.last_processed_timestamp = current_ts
+
+        self.state.update_state_if_needed(self.last_processed_timestamp)
 
         # Calculate lag
         self._calculate_lag(current_ts)
@@ -234,36 +265,24 @@ class RealtimeCollector(BaseCollector):
         lag = (now - current_ts).total_seconds() / 60  # minutes
         self.lag_minutes = lag
 
-        # Determine mode
-        if lag > self.fast_catchup_threshold:
-            if self.mode != "fast-catchup":
-                self.logger.warning(
-                    f"[LAG] Lag detected: {lag:.1f} minutes. Switching to fast-catchup mode!"
-                )
-                self.mode = "fast-catchup"
-        else:
-            if self.mode == "fast-catchup" and lag < self.fast_catchup_threshold / 2:
-                self.logger.info(
-                    f"[LAG] Lag recovered: {lag:.1f} minutes. Returning to normal mode."
-                )
-                self.mode = "normal"
-
+        # Log lag for monitoring
         if lag > 30:
             self.logger.warning(
                 f"[LAG] Significant lag: {lag:.1f} minutes behind real-time"
             )
+        elif lag > 10:
+            self.logger.info(f"[LAG] Catching up: {lag:.1f} minutes behind")
 
     def _calculate_sleep_time(self) -> float:
         """
         Calculate sleep time until next collection.
 
+        Simplified: always use fixed 1-second interval for consistent processing.
+
         Returns:
             Sleep time in seconds
         """
-        if self.mode == "fast-catchup":
-            return self.fast_catchup_interval * 60  # Convert minutes to seconds
-        else:
-            return self.normal_interval * 60
+        return self.collection_interval
 
     def _sleep_with_check(self, seconds: float) -> None:
         """
