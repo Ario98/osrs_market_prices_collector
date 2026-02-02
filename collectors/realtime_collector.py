@@ -111,31 +111,44 @@ class RealtimeCollector(BaseCollector):
         Never skips intervals by requesting "latest".
         """
 
+        cycle_start_time = time.time()
+
         # Determine which timestamp to request
         if self.last_processed_timestamp:
             # ALWAYS request the NEXT timestamp after last processed
-            # This ensures sequential processing and prevents gaps
             next_ts = self.last_processed_timestamp + timedelta(minutes=5)
             target_timestamp = int(next_ts.timestamp())
 
-            # Check if we're behind real-time
+            # Calculate lag from real-time
             lag = (now_utc() - next_ts).total_seconds() / 60
-            if lag > 10:
-                self.logger.info(
-                    f"[CATCHUP] {lag:.1f} min behind, filling gap at {next_ts.isoformat()}"
-                )
-            else:
-                self.logger.debug(f"[FETCH] Requesting timestamp {target_timestamp}")
+
+            # Determine mode based on lag
+            mode = "CATCH-UP" if lag > 2 else "LIVE"
         else:
             # First run only - get latest available
             target_timestamp = None
-            self.logger.info("[FETCH] First run - requesting most recent data")
+            next_ts = None
+            lag = 0
+            mode = "INIT"
+            self.logger.info("[INIT] First run - requesting most recent data")
 
         # Fetch 5m data for specific timestamp
+        api_start = time.time()
         data_5m = self.api.get_5m_data(timestamp=target_timestamp)
+        api_duration = time.time() - api_start
 
         if not data_5m or "data" not in data_5m:
-            self.logger.warning("[FETCH] No data returned from /5m endpoint")
+            # Log failure but still advance to prevent getting stuck
+            ts_str = next_ts.strftime("%H:%M:%S") if next_ts else "latest"
+            self.logger.warning(
+                f"[{mode}] API returned no data for {ts_str} | API: {api_duration:.2f}s"
+            )
+            if target_timestamp:
+                # Advance anyway to prevent infinite loop on empty timestamps
+                self.last_processed_timestamp = datetime.fromtimestamp(
+                    target_timestamp, tz=pytz.UTC
+                )
+                self.state.update_state_if_needed(self.last_processed_timestamp)
             return
 
         # Get timestamp from API response
@@ -143,19 +156,16 @@ class RealtimeCollector(BaseCollector):
         if api_timestamp:
             received_ts = ensure_utc(api_timestamp, "API_5m_cycle")
 
-            # CRITICAL: Check if we got what we requested
+            # Check if we got what we requested
             if target_timestamp:
                 requested_ts = datetime.fromtimestamp(target_timestamp, tz=pytz.UTC)
                 time_diff = abs((received_ts - requested_ts).total_seconds())
 
                 if time_diff > 300:  # More than 5 minutes difference
                     self.logger.warning(
-                        f"[MISMATCH] Requested {requested_ts.isoformat()}, "
-                        f"got {received_ts.isoformat()} ({time_diff / 60:.1f} min diff). "
-                        f"Possible gap or API lag."
+                        f"[{mode}] MISMATCH: Requested {requested_ts.strftime('%H:%M')}, "
+                        f"got {received_ts.strftime('%H:%M')} | Using requested time"
                     )
-                    # Use the requested timestamp for state to maintain sequence
-                    # The API returned different data, but we'll try the requested slot again next cycle
                     current_ts = requested_ts
                 else:
                     current_ts = received_ts
@@ -170,30 +180,50 @@ class RealtimeCollector(BaseCollector):
         if records:
             # Bulk insert to database
             inserted = self.db.bulk_insert_prices(records)
+
+            # Build status message based on context
+            if lag > 10:
+                status = f"{lag:.0f}min behind"
+            elif lag > 2:
+                status = f"{lag:.1f}min behind"
+            else:
+                status = "real-time"
+
+            # Single concise log line
             self.logger.info(
-                f"[INSERT] Inserted {inserted} price records for {current_ts.isoformat()}"
+                f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {status} | "
+                f"Records: {inserted} | API: {api_duration:.2f}s"
             )
 
             # Update latest prices
             self.db.update_latest_prices(records)
+        else:
+            # No trading activity in this window
+            if lag > 2:
+                self.logger.info(
+                    f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {lag:.0f}min behind | "
+                    f"Records: 0 (no trades) | API: {api_duration:.2f}s"
+                )
+            else:
+                # Live mode with no data - less verbose
+                self.logger.debug(
+                    f"[{current_ts.strftime('%H:%M:%S')}] {mode} | Records: 0 | Waiting..."
+                )
 
-        # Update state with the timestamp we intended to process
-        # This ensures we always advance sequentially, even if API returned different time
+        # Update state
         if target_timestamp:
-            # We requested a specific time, advance to next slot
             self.last_processed_timestamp = datetime.fromtimestamp(
                 target_timestamp, tz=pytz.UTC
             )
         else:
-            # First run, use what we got
             self.last_processed_timestamp = current_ts
 
         self.state.update_state_if_needed(self.last_processed_timestamp)
 
-        # Calculate lag
+        # Calculate lag for next cycle
         self._calculate_lag(current_ts)
 
-        # Also fetch latest data (optional, for real-time monitoring)
+        # Fetch latest data
         self._fetch_latest_data()
 
     def _process_5m_data(self, data: Dict, timestamp: datetime) -> List[Dict]:
