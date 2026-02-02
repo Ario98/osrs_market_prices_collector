@@ -8,6 +8,7 @@ This module provides:
 - State consistency verification
 """
 
+import calendar
 import json
 import logging
 import os
@@ -208,7 +209,34 @@ class StateManager:
 
         return restart_ts
 
-    def calculate_backfill_restart(self, months: int = 6) -> Tuple[datetime, datetime]:
+    def _subtract_calendar_months(self, dt: datetime, months: int) -> datetime:
+        """
+        Subtract calendar months from a datetime, handling year boundaries.
+
+        Args:
+            dt: Base datetime
+            months: Number of months to subtract
+
+        Returns:
+            Datetime with months subtracted
+        """
+        year = dt.year
+        month = dt.month - months
+
+        # Handle year wrap-around
+        while month <= 0:
+            month += 12
+            year -= 1
+
+        # Handle day overflow (e.g., March 31 -> Feb 28/29)
+        last_day = calendar.monthrange(year, month)[1]
+        day = min(dt.day, last_day)
+
+        return dt.replace(year=year, month=month, day=day)
+
+    def calculate_backfill_restart(
+        self, months: int = 6, overlap_minutes: Optional[int] = None
+    ) -> Tuple[datetime, datetime]:
         """
         Calculate backfill restart parameters.
 
@@ -219,7 +247,8 @@ class StateManager:
         4. Resume with safety overlap
 
         Args:
-            months: Number of months to backfill
+            months: Number of months to backfill (calendar months)
+            overlap_minutes: Optional override for overlap minutes
 
         Returns:
             Tuple of (current_position, target_timestamp)
@@ -228,8 +257,8 @@ class StateManager:
             f"[BACKFILL-RESTART] Calculating restart for {months} month backfill"
         )
 
-        # Calculate target timestamp
-        target_ts = now_utc() - timedelta(days=30 * months)
+        # Calculate target timestamp using calendar months
+        target_ts = self._subtract_calendar_months(now_utc(), months)
         target_ts = target_ts.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # Get oldest data in database
@@ -256,7 +285,13 @@ class StateManager:
         # Use database as source of truth
         if db_oldest:
             # Add safety overlap (go back a bit further)
-            overlap = timedelta(minutes=self.restart_overlap_minutes)
+            # Use provided overlap or fall back to restart_overlap_minutes
+            overlap_mins = (
+                overlap_minutes
+                if overlap_minutes is not None
+                else self.restart_overlap_minutes
+            )
+            overlap = timedelta(minutes=overlap_mins)
             current_ts = db_oldest - overlap
 
             if state_ts and state_ts != db_oldest:
@@ -281,7 +316,7 @@ class StateManager:
         """Mark backfill collector as completed."""
         self.save_state(
             now_utc(),
-            status="completed",
+            status="stopped",  # Use valid status to avoid CHECK constraint violation
             metadata={
                 "backfill_status": "completed",
                 "completed_at": now_utc().isoformat(),

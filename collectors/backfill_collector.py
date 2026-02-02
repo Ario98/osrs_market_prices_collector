@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from collectors.utils.state import BackfillProgressTracker
+from collectors.utils.timezone import ensure_utc
 
 from collectors.base_collector import BaseCollector
 
@@ -55,6 +56,42 @@ class BackfillCollector(BaseCollector):
             f"[CONFIG] Backfill overlap: {self.backfill_overlap_minutes} minutes"
         )
 
+    def _check_retention_policy(self) -> None:
+        """Check if retention policy matches backfill period and warn if not."""
+        try:
+            # Query TimescaleDB for retention policy on prices table
+            query = """
+                SELECT config->>'drop_after' as retention_interval
+                FROM timescaledb_information.jobs
+                WHERE hypertable_name = 'prices'
+                AND proc_name = 'policy_retention'
+                LIMIT 1
+            """
+            result = self.db.execute(query)
+
+            if result:
+                retention_str = result[0][0]  # e.g., "6 months"
+                # Parse to extract months
+                import re
+
+                match = re.search(r"(\d+)\s*month", retention_str.lower())
+                if match:
+                    retention_months = int(match.group(1))
+
+                    if self.backfill_months > retention_months:
+                        self.logger.warning(
+                            f"[RETENTION MISMATCH] Backfill: {self.backfill_months} months, "
+                            f"Retention: {retention_months} months. "
+                            f"Oldest {(self.backfill_months - retention_months)} months will be PURGED!"
+                        )
+                    else:
+                        self.logger.info(
+                            f"[RETENTION OK] Retention: {retention_months} months >= Backfill: {self.backfill_months} months"
+                        )
+        except Exception as e:
+            # Don't fail if we can't check retention
+            self.logger.debug(f"[RETENTION] Could not check retention policy: {e}")
+
     def run(self) -> None:
         """Main backfill loop."""
         self.log_startup_info()
@@ -64,6 +101,9 @@ class BackfillCollector(BaseCollector):
             self.logger.error("Failed to connect to database, exiting")
             sys.exit(1)
 
+        # Check retention policy after DB connection
+        self._check_retention_policy()
+
         # Wait for real-time collector if database is empty
         # This ensures we have some data before starting backfill
         if not self._wait_for_initial_data():
@@ -72,16 +112,43 @@ class BackfillCollector(BaseCollector):
             )
             sys.exit(1)
 
-        # Calculate restart parameters
+        # Calculate restart parameters with backfill-specific overlap
         self.current_timestamp, self.target_timestamp = (
-            self.state.calculate_backfill_restart(self.backfill_months)
+            self.state.calculate_backfill_restart(
+                self.backfill_months, overlap_minutes=self.backfill_overlap_minutes
+            )
         )
 
-        # Check if already complete
-        if self.current_timestamp <= self.target_timestamp:
-            self.logger.info("[BACKFILL] Already complete! Target timestamp reached.")
-            self.state.mark_backfill_complete()
-            return
+        # Check for completion with proper overlap logic
+        db_oldest = self.db.get_oldest_timestamp("prices")
+        if db_oldest:
+            db_oldest = ensure_utc(db_oldest, "db_oldest")
+            effective_target = self.target_timestamp + timedelta(
+                minutes=self.backfill_overlap_minutes
+            )
+
+            if db_oldest <= effective_target:
+                self.logger.info(
+                    f"[BACKFILL] Already complete! Oldest data ({db_oldest.isoformat()}) at or before target ({effective_target.isoformat()})"
+                )
+                self.state.mark_backfill_complete()
+                self._sleep_until_restart()
+                return
+            else:
+                self.logger.info(
+                    f"[BACKFILL] Need to fill gap: target {self.target_timestamp.isoformat()} to oldest {db_oldest.isoformat()}"
+                )
+                # Start from oldest data, not from before it
+                self.current_timestamp = db_oldest
+        else:
+            self.logger.info("[BACKFILL] No existing data, starting fresh from now")
+
+        # Validate timestamps are set
+        if self.current_timestamp is None or self.target_timestamp is None:
+            self.logger.error(
+                "[BACKFILL] Failed to determine timestamps, cannot proceed"
+            )
+            sys.exit(1)
 
         self.logger.info(
             f"[BACKFILL] Starting from: {self.current_timestamp.isoformat()}"
@@ -348,6 +415,22 @@ class BackfillCollector(BaseCollector):
         while elapsed < seconds and not self.should_stop():
             time.sleep(min(check_interval, seconds - elapsed))
             elapsed += check_interval
+
+    def _sleep_until_restart(self, check_interval_seconds: int = 60) -> None:
+        """
+        Sleep indefinitely until container is restarted.
+        Used when backfill is complete to keep container alive but idle.
+
+        Args:
+            check_interval_seconds: How often to log a heartbeat
+        """
+        self.logger.info(
+            "[BACKFILL] Entering sleep mode - backfill complete. Restart container to check for extension."
+        )
+
+        while not self.should_stop():
+            time.sleep(check_interval_seconds)
+            self.logger.debug("[BACKFILL] Sleeping... (complete)")
 
 
 if __name__ == "__main__":

@@ -103,7 +103,7 @@ secrets/
 # Database data and runtime files
 timescale_data/
 grafana_data/
-logs/*.log
+logs/*.log*
 *.dump
 *.sql.gz
 
