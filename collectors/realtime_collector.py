@@ -88,12 +88,6 @@ class RealtimeCollector(BaseCollector):
                     # Calculate sleep time based on mode
                     sleep_time = self._calculate_sleep_time()
 
-                    cycle_duration = time.time() - cycle_start
-                    self.logger.info(
-                        f"[CYCLE] Duration: {cycle_duration:.2f}s, Sleep: {sleep_time:.2f}s, "
-                        f"Last: {self.last_processed_timestamp.isoformat() if self.last_processed_timestamp else 'None'}"
-                    )
-
                     # Sleep with interruption check
                     self._sleep_with_check(sleep_time)
 
@@ -198,17 +192,19 @@ class RealtimeCollector(BaseCollector):
             # Update latest prices
             self.db.update_latest_prices(records)
         else:
-            # No trading activity in this window
-            if lag > 2:
-                self.logger.info(
-                    f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {lag:.0f}min behind | "
-                    f"Records: 0 (no trades) | API: {api_duration:.2f}s"
-                )
+            # No trading activity in this window - still log it
+            if lag > 10:
+                status = f"{lag:.0f}min behind"
+            elif lag > 2:
+                status = f"{lag:.1f}min behind"
             else:
-                # Live mode with no data - less verbose
-                self.logger.debug(
-                    f"[{current_ts.strftime('%H:%M:%S')}] {mode} | Records: 0 | Waiting..."
-                )
+                status = "real-time"
+
+            # Always show the status, even with 0 records
+            self.logger.info(
+                f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {status} | "
+                f"Records: 0 (no trades) | API: {api_duration:.2f}s"
+            )
 
         # Update state
         if target_timestamp:
