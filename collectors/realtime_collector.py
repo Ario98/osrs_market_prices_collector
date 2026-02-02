@@ -111,6 +111,22 @@ class RealtimeCollector(BaseCollector):
         if self.last_processed_timestamp:
             # ALWAYS request the NEXT timestamp after last processed
             next_ts = self.last_processed_timestamp + timedelta(minutes=5)
+
+            # Check if we're asking for future data (API won't have it yet)
+            time_until_available = (next_ts - now_utc()).total_seconds()
+
+            if time_until_available > 0:
+                # Next timestamp is in the future, wait for it
+                wait_seconds = min(
+                    time_until_available + 5, 60
+                )  # Wait + 5s buffer, max 60s
+                self.logger.info(
+                    f"[WAIT] Next data at {next_ts.strftime('%H:%M:%S')} "
+                    f"(in {wait_seconds:.0f}s). Sleeping..."
+                )
+                time.sleep(wait_seconds)
+                return  # Exit cycle, will retry on next iteration
+
             target_timestamp = int(next_ts.timestamp())
 
             # Calculate lag from real-time
