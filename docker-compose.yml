@@ -76,7 +76,7 @@ services:
       context: .
       dockerfile: Dockerfile.collector
     container_name: osrs-backfill-collector
-    restart: unless-stopped
+    restart: on-failure:3
     depends_on:
       timescaledb:
         condition: service_healthy
