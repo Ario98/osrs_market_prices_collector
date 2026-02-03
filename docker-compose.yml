@@ -49,14 +49,9 @@ services:
       - API_BASE_URL=${API_BASE_URL:-https://prices.runescape.wiki/api/v1/osrs}
       - API_USER_AGENT=${API_USER_AGENT:-OSRS-Market-Collector/1.0}
       - API_RATE_LIMIT_SECONDS=${API_RATE_LIMIT_SECONDS:-1.0}
-      - FAST_CATCHUP_THRESHOLD_MINUTES=${FAST_CATCHUP_THRESHOLD_MINUTES:-15}
-      - FAST_CATCHUP_INTERVAL_MINUTES=${FAST_CATCHUP_INTERVAL_MINUTES:-2.5}
       - RESTART_OVERLAP_MINUTES=${RESTART_OVERLAP_MINUTES:-5}
-      - STATE_SYNC_FREQUENCY=${STATE_SYNC_FREQUENCY:-100}
       - TIMEZONE_STRICT_MODE=${TIMEZONE_STRICT_MODE:-true}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - TEST_MODE=${TEST_MODE:-false}
-      - TEST_ITEM_IDS=${TEST_ITEM_IDS:-}
     volumes:
       - ./logs:/app/logs
       - ./collectors:/app/collectors:ro

@@ -46,6 +46,8 @@ class RealtimeCollector(BaseCollector):
         # State
         self.last_processed_timestamp: Optional[datetime] = None
         self.lag_minutes = 0.0
+        self.current_retry_count = 0  # Track retries for current timestamp
+        self.max_retries = 900  # 15 minutes at 1 call per second
 
         self.logger.info(
             f"[CONFIG] Collection interval: {self.collection_interval} seconds"
@@ -148,17 +150,28 @@ class RealtimeCollector(BaseCollector):
         api_duration = time.time() - api_start
 
         if not data_5m or "data" not in data_5m:
-            # Log failure but still advance to prevent getting stuck
+            # API returned no data - use retry logic
             ts_str = next_ts.strftime("%H:%M:%S") if next_ts else "latest"
-            self.logger.warning(
-                f"[{mode}] API returned no data for {ts_str} | API: {api_duration:.2f}s"
-            )
-            if target_timestamp:
-                # Advance anyway to prevent infinite loop on empty timestamps
-                self.last_processed_timestamp = datetime.fromtimestamp(
-                    target_timestamp, tz=pytz.UTC
+            self.current_retry_count += 1
+
+            if self.current_retry_count < self.max_retries:
+                # Keep trying
+                if self.current_retry_count % 10 == 0:
+                    self.logger.warning(
+                        f"[WAIT] {ts_str} - API returned no data, retrying ({self.current_retry_count}/{self.max_retries})"
+                    )
+                return  # Will retry same timestamp
+            else:
+                # Timeout - skip this timestamp
+                self.logger.error(
+                    f"[TIMEOUT] {ts_str} - API failed after {self.max_retries} attempts, skipping"
                 )
-                self.state.update_state_if_needed(self.last_processed_timestamp)
+                if target_timestamp:
+                    self.current_retry_count = 0
+                    self.last_processed_timestamp = datetime.fromtimestamp(
+                        target_timestamp, tz=pytz.UTC
+                    )
+                    self.state.update_state_if_needed(self.last_processed_timestamp)
             return
 
         # Get timestamp from API response
@@ -188,6 +201,9 @@ class RealtimeCollector(BaseCollector):
         records = self._process_5m_data(data_5m["data"], current_ts)
 
         if records:
+            # SUCCESS: Data received - reset retry counter and advance
+            self.current_retry_count = 0
+
             # Bulk insert to database
             inserted = self.db.bulk_insert_prices(records)
 
@@ -201,36 +217,63 @@ class RealtimeCollector(BaseCollector):
 
             # Single concise log line
             self.logger.info(
-                f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {status} | "
-                f"Records: {inserted} | API: {api_duration:.2f}s"
+                f"[{mode}] {status} | {inserted} records | {api_duration:.2f}s API"
             )
 
             # Update latest prices
             self.db.update_latest_prices(records)
-        else:
-            # No trading activity in this window - still log it
-            if lag > 10:
-                status = f"{lag:.0f}min behind"
-            elif lag > 2:
-                status = f"{lag:.1f}min behind"
+
+            # Advance to next timestamp
+            if target_timestamp:
+                self.last_processed_timestamp = datetime.fromtimestamp(
+                    target_timestamp, tz=pytz.UTC
+                )
             else:
-                status = "real-time"
+                self.last_processed_timestamp = current_ts
 
-            # Always show the status, even with 0 records
-            self.logger.info(
-                f"[{current_ts.strftime('%H:%M:%S')}] {mode} | {status} | "
-                f"Records: 0 (no trades) | API: {api_duration:.2f}s"
-            )
+            self.state.update_state_if_needed(self.last_processed_timestamp)
 
-        # Update state
-        if target_timestamp:
-            self.last_processed_timestamp = datetime.fromtimestamp(
-                target_timestamp, tz=pytz.UTC
-            )
         else:
-            self.last_processed_timestamp = current_ts
+            # NO DATA: Increment retry counter
+            self.current_retry_count += 1
 
-        self.state.update_state_if_needed(self.last_processed_timestamp)
+            if self.current_retry_count < self.max_retries:
+                # Keep trying - log every 10th attempt to avoid spam
+                if self.current_retry_count % 10 == 0:
+                    self.logger.info(
+                        f"[WAIT] {current_ts.strftime('%H:%M:%S')} - "
+                        f"No data yet, retrying ({self.current_retry_count}/{self.max_retries})"
+                    )
+                # Don't advance - will retry same timestamp on next cycle
+                return
+            else:
+                # TIMEOUT: 15 minutes elapsed with no data
+                self.logger.warning(
+                    f"[TIMEOUT] {current_ts.strftime('%H:%M:%S')} - "
+                    f"No data after {self.max_retries} attempts (15min), skipping"
+                )
+
+                # Build status for timeout message
+                if lag > 10:
+                    status = f"{lag:.0f}min behind"
+                elif lag > 2:
+                    status = f"{lag:.1f}min behind"
+                else:
+                    status = "real-time"
+
+                self.logger.info(
+                    f"[{mode}] {status} | 0 records (timeout) | {api_duration:.2f}s API"
+                )
+
+                # Reset counter and advance
+                self.current_retry_count = 0
+                if target_timestamp:
+                    self.last_processed_timestamp = datetime.fromtimestamp(
+                        target_timestamp, tz=pytz.UTC
+                    )
+                else:
+                    self.last_processed_timestamp = current_ts
+                self.state.update_state_if_needed(self.last_processed_timestamp)
 
         # Calculate lag for next cycle
         self._calculate_lag(current_ts)
@@ -254,11 +297,6 @@ class RealtimeCollector(BaseCollector):
         for item_id_str, item_data in data.items():
             item_id = int(item_id_str)
 
-            # Skip if not in test whitelist (when in test mode)
-            if self.test_mode and self.test_item_ids:
-                if item_id not in self.test_item_ids:
-                    continue
-
             # Parse record
             record = self.api.parse_5m_record(
                 item_id, item_data, int(timestamp.timestamp())
@@ -278,10 +316,6 @@ class RealtimeCollector(BaseCollector):
                 records = []
                 for item_id_str, item_data in data_latest["data"].items():
                     item_id = int(item_id_str)
-
-                    if self.test_mode and self.test_item_ids:
-                        if item_id not in self.test_item_ids:
-                            continue
 
                     record = self.api.parse_latest_record(item_id, item_data)
                     if record:

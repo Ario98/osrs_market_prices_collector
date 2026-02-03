@@ -57,8 +57,6 @@ class BaseCollector(ABC):
         self.last_processed_timestamp: Optional[datetime] = None
 
         # Configuration
-        self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
-        self.test_item_ids = self._parse_test_item_ids()
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
 
         # Initialize components
@@ -76,23 +74,6 @@ class BaseCollector(ABC):
         self._setup_signal_handlers()
 
         self.logger.info(f"[{self.collector_name}] Collector initialized")
-        self.logger.info(f"[{self.collector_name}] Test mode: {self.test_mode}")
-
-        if self.test_mode and self.test_item_ids:
-            self.logger.info(
-                f"[{self.collector_name}] Test items: {len(self.test_item_ids)} items"
-            )
-
-    def _parse_test_item_ids(self) -> Optional[list]:
-        """Parse TEST_ITEM_IDS environment variable."""
-        test_ids_str = os.getenv("TEST_ITEM_IDS", "")
-        if not test_ids_str:
-            return None
-        try:
-            return [int(x.strip()) for x in test_ids_str.split(",") if x.strip()]
-        except ValueError:
-            self.logger.warning("Invalid TEST_ITEM_IDS format, ignoring")
-            return None
 
     def _setup_logging(self) -> None:
         """Configure structured logging."""

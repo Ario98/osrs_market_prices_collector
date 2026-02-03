@@ -300,12 +300,11 @@ class BackfillCollector(BaseCollector):
                 # Insert to database
                 inserted = self.db.bulk_insert_prices(records)
                 self.logger.info(
-                    f"[INSERT] Timestamp {self.current_timestamp.isoformat()}: "
-                    f"{inserted} records"
+                    f"[BACKFILL] {self.current_timestamp.strftime('%Y-%m-%d %H:%M')} | {inserted} records"
                 )
             else:
-                self.logger.debug(
-                    f"[INSERT] No records for {self.current_timestamp.isoformat()}"
+                self.logger.info(
+                    f"[BACKFILL] {self.current_timestamp.strftime('%Y-%m-%d %H:%M')} | 0 records"
                 )
 
             return True
@@ -331,11 +330,6 @@ class BackfillCollector(BaseCollector):
 
         for item_id_str, item_data in data.items():
             item_id = int(item_id_str)
-
-            # Skip if not in test whitelist (when in test mode)
-            if self.test_mode and self.test_item_ids:
-                if item_id not in self.test_item_ids:
-                    continue
 
             # Parse record
             record = self.api.parse_5m_record(
