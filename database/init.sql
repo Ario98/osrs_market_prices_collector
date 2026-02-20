@@ -91,38 +91,16 @@ CREATE TABLE IF NOT EXISTS prices (
     -- Item reference
     item_id INTEGER NOT NULL,
     
-    -- Price data from Wiki API /5m endpoint
+    -- Price data from Wiki API /5m endpoint (raw data only)
     avg_high_price BIGINT,           -- Average price at high volume
     avg_low_price BIGINT,            -- Average price at low volume
     high_price_volume BIGINT,        -- Volume traded at high price
     low_price_volume BIGINT,         -- Volume traded at low price
     
-    -- Calculated fields (computed on insert or via triggers)
-    spread BIGINT GENERATED ALWAYS AS (
-        CASE 
-            WHEN avg_high_price IS NOT NULL AND avg_low_price IS NOT NULL 
-            THEN avg_high_price - avg_low_price 
-            ELSE NULL 
-        END
-    ) STORED,
-    
-    total_volume BIGINT GENERATED ALWAYS AS (
-        COALESCE(high_price_volume, 0) + COALESCE(low_price_volume, 0)
-    ) STORED,
-    
-    -- Data quality flags
-    has_high_data BOOLEAN GENERATED ALWAYS AS (
-        avg_high_price IS NOT NULL AND high_price_volume IS NOT NULL
-    ) STORED,
-    
-    has_low_data BOOLEAN GENERATED ALWAYS AS (
-        avg_low_price IS NOT NULL AND low_price_volume IS NOT NULL
-    ) STORED,
-    
     -- Insert metadata
     inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    -- Primary key for idempotent inserts (excludes generated columns)
+    -- Primary key for idempotent inserts
     PRIMARY KEY (timestamp, item_id)
 );
 
@@ -145,23 +123,13 @@ CREATE INDEX IF NOT EXISTS idx_prices_item_time
 CREATE INDEX IF NOT EXISTS idx_prices_timestamp 
     ON prices (timestamp DESC);
 
--- 3. Volume-based queries (identify high-activity items)
-CREATE INDEX IF NOT EXISTS idx_prices_volume 
-    ON prices (total_volume DESC, timestamp DESC) 
-    WHERE total_volume > 0;
-
--- 4. Spread queries (for arbitrage analysis)
-CREATE INDEX IF NOT EXISTS idx_prices_spread 
-    ON prices (spread DESC, timestamp DESC) 
-    WHERE spread IS NOT NULL;
-
 -- Comments
-COMMENT ON TABLE prices IS 'Time-series price data for all OSRS items. 5-minute intervals. TimescaleDB hypertable with daily chunks.';
-COMMENT ON COLUMN prices.timestamp IS 'UTC timestamp of the 5-minute interval. All times in UTC.';
-COMMENT ON COLUMN prices.avg_high_price IS 'Average price of items sold at the high price point (seller perspective)';
-COMMENT ON COLUMN prices.avg_low_price IS 'Average price of items sold at the low price point (buyer perspective)';
-COMMENT ON COLUMN prices.spread IS 'Price spread (high - low). Indicator of market liquidity.';
-COMMENT ON COLUMN prices.total_volume IS 'Combined trading volume at both price points';
+COMMENT ON TABLE prices IS 'Time-series price data for all OSRS items. 5-minute intervals. Stores only raw data from API.';
+COMMENT ON COLUMN prices.timestamp IS 'UTC timestamp of the 5-minute interval';
+COMMENT ON COLUMN prices.avg_high_price IS 'Average price of items sold at the high price point';
+COMMENT ON COLUMN prices.avg_low_price IS 'Average price of items sold at the low price point';
+COMMENT ON COLUMN prices.high_price_volume IS 'Volume traded at high price';
+COMMENT ON COLUMN prices.low_price_volume IS 'Volume traded at low price';
 
 -- =============================================================================
 -- LATEST PRICES TABLE
@@ -178,15 +146,6 @@ CREATE TABLE IF NOT EXISTS latest_prices (
     -- Price data (volume not available from /latest API endpoint)
     avg_high_price BIGINT,
     avg_low_price BIGINT,
-    
-    -- Calculated spread
-    spread BIGINT GENERATED ALWAYS AS (
-        CASE 
-            WHEN avg_high_price IS NOT NULL AND avg_low_price IS NOT NULL 
-            THEN avg_high_price - avg_low_price 
-            ELSE NULL 
-        END
-    ) STORED,
     
     -- Metadata
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
