@@ -126,7 +126,7 @@ class RealtimeCollector(BaseCollector):
                     f"[WAIT] Next data at {next_ts.strftime('%H:%M:%S')} "
                     f"(in {wait_seconds:.0f}s). Sleeping..."
                 )
-                time.sleep(wait_seconds)
+                self._sleep_with_check(wait_seconds)  # Interruptible: honors SIGTERM within 1s
                 return  # Exit cycle, will retry on next iteration
 
             target_timestamp = int(next_ts.timestamp())
